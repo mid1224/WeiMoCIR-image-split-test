@@ -23,7 +23,8 @@ from tqdm import tqdm
 
 from src.data_utils import FashionIQDataset, targetpad_transform, CIRRDataset
 from src.utils import extract_index_features, collate_fn, element_wise_sum, device, \
-    extract_index_features_with_text_captions_clip, element_wise_sum_with_alpha, extract_index_features_clip
+    extract_index_features_with_text_captions_clip, element_wise_sum_with_alpha, extract_index_features_clip, \
+    encode_text_features
 
 
 def compute_fiq_val_metrics(
@@ -32,7 +33,8 @@ def compute_fiq_val_metrics(
     clip_tokenizer: callable,
     index_features: torch.Tensor,
     index_names: List[str],
-    combining_function: callable
+    combining_function: callable,
+    caption_joiner: str = "and",
 ) -> Tuple[float, float]:
     """
     Compute validation metrics on FashionIQ dataset
@@ -53,7 +55,8 @@ def compute_fiq_val_metrics(
         relative_val_dataset,
         combining_function,
         index_names,
-        index_features
+        index_features,
+        caption_joiner,
     )
     # Normalize the index features
     index_features = F.normalize(index_features, dim=-1).float()
@@ -84,7 +87,8 @@ def compute_fiq_val_metrics_text_image(
     image_index_features: torch.Tensor,
     image_index_names: List[str],
     combining_function: callable,
-    beta: float
+    beta: float,
+    caption_joiner: str = "and",
 ) -> Tuple[float, float]:
     """
     Compute validation metrics on FashionIQ dataset combining text and image similarities.
@@ -112,7 +116,8 @@ def compute_fiq_val_metrics_text_image(
             relative_val_dataset,
             combining_function,
             text_names,
-            text_features
+            text_features,
+            caption_joiner,
         )
         # Normalize features
         text_features = F.normalize(text_features, dim=-1)
@@ -130,7 +135,8 @@ def compute_fiq_val_metrics_text_image(
             relative_val_dataset,
             combining_function,
             image_index_names,
-            image_index_features
+            image_index_features,
+            caption_joiner,
         )
 
         # Normalize and compute similarities
@@ -175,6 +181,7 @@ def generate_fiq_val_predictions(
     combining_function: callable,
     index_names: List[str],
     index_features: torch.Tensor,
+    caption_joiner: str = "and",
     no_print_output: bool = False,
 ) -> Tuple[torch.tensor, List[str]]:
     """
@@ -201,8 +208,7 @@ def generate_fiq_val_predictions(
     # Get a mapping from index names to index features
     name_to_feat = dict(zip(index_names, index_features))
 
-    # Initialize predicted features and target names
-    predicted_features = torch.empty((0, clip_text_encoder.text_projection.out_features)).to(device, non_blocking=True)
+    predicted_feature_batches = []
     target_names = []
 
     if not no_print_output:
@@ -212,14 +218,13 @@ def generate_fiq_val_predictions(
         # Concatenate the captions in a deterministic way
         flattened_captions: list = np.array(captions).T.flatten().tolist()
         input_captions = [
-            f"{flattened_captions[i].strip('.?, ').capitalize()} and {flattened_captions[i + 1].strip('.?, ')}"
+            f"{flattened_captions[i].strip('.?, ').capitalize()} {caption_joiner} {flattened_captions[i + 1].strip('.?, ')}"
             for i in range(0, len(flattened_captions), 2)
         ]
 
         # Compute the predicted features
         with torch.no_grad():
-            text_tokens = clip_tokenizer(input_captions, context_length=77).to(device, non_blocking=True)
-            text_features = clip_text_encoder(text_tokens, return_dict=False)[0]
+            text_features = encode_text_features(clip_text_encoder, clip_tokenizer, input_captions)
             # Check whether a single element is in the batch due to the exception raised by torch.stack when used with
             # a single tensor
             if text_features.shape[0] == 1:
@@ -232,9 +237,10 @@ def generate_fiq_val_predictions(
                 # retrieve the reference image features directly from the index features
             batch_predicted_features = combining_function(reference_image_features, text_features)
 
-        predicted_features = torch.vstack((predicted_features, F.normalize(batch_predicted_features, dim=-1)))
+        predicted_feature_batches.append(F.normalize(batch_predicted_features, dim=-1))
         target_names.extend(batch_target_names)
 
+    predicted_features = torch.vstack(predicted_feature_batches)
     return predicted_features, target_names
 
 
@@ -243,7 +249,11 @@ def fashioniq_val_retrieval(
     combining_function: callable,
     clip_text_encoder: torch.nn.Module,
     clip_img_encoder: torch.nn.Module,
-    preprocess: callable
+    preprocess: callable,
+    fashioniq_captions_dir: str = None,
+    fashioniq_caption_language: str = None,
+    use_caption_direction_tokens: bool = True,
+    caption_joiner: str = "and",
 ):
     """
     Perform retrieval on FashionIQ validation set computing the metrics. To combine the features, the `combining_function`
@@ -260,9 +270,25 @@ def fashioniq_val_retrieval(
     clip_img_encoder = clip_img_encoder.float().eval()
 
     # Define the validation datasets and extract the index features
-    classic_val_dataset = FashionIQDataset('val', [dress_type], 'classic', preprocess)
+    classic_val_dataset = FashionIQDataset(
+        'val',
+        [dress_type],
+        'classic',
+        preprocess,
+        captions_dir=fashioniq_captions_dir,
+        caption_language=fashioniq_caption_language,
+        use_caption_direction_tokens=use_caption_direction_tokens,
+    )
     index_features, index_names = extract_index_features(classic_val_dataset, clip_img_encoder)
-    relative_val_dataset = FashionIQDataset('val', [dress_type], 'relative', preprocess)
+    relative_val_dataset = FashionIQDataset(
+        'val',
+        [dress_type],
+        'relative',
+        preprocess,
+        captions_dir=fashioniq_captions_dir,
+        caption_language=fashioniq_caption_language,
+        use_caption_direction_tokens=use_caption_direction_tokens,
+    )
 
     return compute_fiq_val_metrics(
         relative_val_dataset,
@@ -270,7 +296,8 @@ def fashioniq_val_retrieval(
         clip_img_encoder,
         index_features,
         index_names,
-        combining_function
+        combining_function,
+        caption_joiner,
     )
 
 
@@ -282,7 +309,11 @@ def fashioniq_val_retrieval_text_image(
     clip_tokenizer: callable,
     text_captions: List[dict],
     beta: float,
-    preprocess: callable
+    preprocess: callable,
+    fashioniq_captions_dir: str = None,
+    fashioniq_caption_language: str = None,
+    use_caption_direction_tokens: bool = True,
+    caption_joiner: str = "and",
 ) -> Tuple[float, float]:
     """
     Perform retrieval on FashionIQ validation set computing the metrics. To combine the features, the `combining_function`
@@ -300,7 +331,15 @@ def fashioniq_val_retrieval_text_image(
     clip_img_encoder = clip_img_encoder.float().eval()
 
     # Define the validation datasets and extract the index features
-    classic_val_dataset = FashionIQDataset('val', [dress_type], 'classic', preprocess)
+    classic_val_dataset = FashionIQDataset(
+        'val',
+        [dress_type],
+        'classic',
+        preprocess,
+        captions_dir=fashioniq_captions_dir,
+        caption_language=fashioniq_caption_language,
+        use_caption_direction_tokens=use_caption_direction_tokens,
+    )
 
     multiple_index_features, multiple_index_names = [], []
 
@@ -317,7 +356,15 @@ def fashioniq_val_retrieval_text_image(
 
     image_index_features, image_index_names = extract_index_features_clip(classic_val_dataset, clip_img_encoder)
 
-    relative_val_dataset = FashionIQDataset('val', [dress_type], 'relative', preprocess)
+    relative_val_dataset = FashionIQDataset(
+        'val',
+        [dress_type],
+        'relative',
+        preprocess,
+        captions_dir=fashioniq_captions_dir,
+        caption_language=fashioniq_caption_language,
+        use_caption_direction_tokens=use_caption_direction_tokens,
+    )
 
     return compute_fiq_val_metrics_text_image(
         relative_val_dataset,
@@ -328,7 +375,8 @@ def fashioniq_val_retrieval_text_image(
         image_index_features,
         image_index_names,
         combining_function,
-        beta
+        beta,
+        caption_joiner,
     )
 
 
@@ -558,8 +606,7 @@ def generate_cirr_val_predictions(
     # Get a mapping from index names to index features
     name_to_feat = dict(zip(index_names, index_features))
 
-    # Initialize predicted features, target_names, group_members and reference_names
-    predicted_features = torch.empty((0, clip_text_encoder.text_projection.out_features)).to(device, non_blocking=True)
+    predicted_feature_batches = []
     target_names = []
     group_members = []
     reference_names = []
@@ -573,8 +620,7 @@ def generate_cirr_val_predictions(
 
         # Compute the predicted features
         with torch.no_grad():
-            text_tokens = clip_tokenizer(captions, context_length=77).to(device, non_blocking=True)
-            text_features = clip_text_encoder(text_tokens, return_dict=False)[0]
+            text_features = encode_text_features(clip_text_encoder, clip_tokenizer, captions)
             # Check whether a single element is in the batch due to the exception raised by torch.stack when used with
             # a single tensor
             if text_features.shape[0] == 1:
@@ -587,11 +633,12 @@ def generate_cirr_val_predictions(
                 # retrieve the reference image features directly from the index features
             batch_predicted_features = combining_function(reference_image_features, text_features)
 
-        predicted_features = torch.vstack((predicted_features, F.normalize(batch_predicted_features, dim=-1)))
+        predicted_feature_batches.append(F.normalize(batch_predicted_features, dim=-1))
         target_names.extend(batch_target_names)
         group_members.extend(batch_group_members)
         reference_names.extend(batch_reference_names)
 
+    predicted_features = torch.vstack(predicted_feature_batches)
     return predicted_features, reference_names, target_names, group_members
 
 
@@ -691,6 +738,10 @@ def main():
 
     parser.add_argument("--clip_name", type=str,
                         help="Name of the CLIP model should be in like ['laion/CLIP-ViT-L-14-laion2B-s32B-b82K', 'laion/CLIP-ViT-H-14-laion2B-s32B-b79K', 'Geonmo/CLIP-Giga-config-fixed']")
+    parser.add_argument("--model_backend", default="clip", type=str, choices=["clip", "mclip"],
+                        help="Use 'mclip' for multilingual text encoding with the paired ViT-B/32 image encoder")
+    parser.add_argument("--image_clip_name", default="openai/clip-vit-base-patch32", type=str,
+                        help="Image encoder to use with mCLIP")
 
     parser.add_argument("--clip-model-path", type=Path, help="Path to the fine-tuned CLIP model")
 
@@ -698,49 +749,89 @@ def main():
                         help="Preprocess pipeline to use")
 
     parser.add_argument("--text_captions_path", type=str, help="Path to the text captions for FashionIQ dataset")
+    parser.add_argument("--fashioniq_captions_dir", type=str,
+                        help="Directory containing FashionIQ relative-caption JSON files")
+    parser.add_argument("--fashioniq_caption_language", type=str,
+                        help="Optional FashionIQ caption file suffix, e.g. 'vi' reads cap.shirt.val.vi.json")
+    parser.add_argument("--caption_joiner", type=str,
+                        help="Word used to join the two FashionIQ relative captions")
+    parser.add_argument("--disable_caption_direction_tokens", action="store_true",
+                        help="Do not prepend [FORWARD]/[BACKWARD] tags to FashionIQ captions")
     parser.add_argument('--alpha', default=-1, type=float,
                         help='Weight for combining text and image features use element wise sum if set to 0 ~ 1')
     parser.add_argument("--beta", default=0.5, type=float,
                         help="Weight for combining text and image similarities, Close to 1 gives more weight to text")
 
     args = parser.parse_args()
-
-    from transformers import CLIPTextModelWithProjection
-
-    if args.clip_name == 'laion/CLIP-ViT-L-14-laion2B-s32B-b82K':
-        clip_text_encoder = CLIPTextModelWithProjection.from_pretrained(
-            args.clip_name,
-            torch_dtype=torch.float32,
-            projection_dim=768
-        )
-    else:
-        clip_text_encoder = CLIPTextModelWithProjection.from_pretrained(
-            args.clip_name,
-            torch_dtype=torch.float32
-        )
-    clip_text_encoder = clip_text_encoder.float().to(device)
-
-    print("clip text encoder loaded.")
-    clip_text_encoder.eval()
+    caption_joiner = args.caption_joiner
+    if caption_joiner is None:
+        caption_joiner = "và" if args.fashioniq_caption_language == "vi" else "and"
+    use_caption_direction_tokens = not args.disable_caption_direction_tokens
+    if args.model_backend == "mclip" and args.fashioniq_caption_language == "vi":
+        use_caption_direction_tokens = False
 
     from transformers import CLIPVisionModelWithProjection
-    if args.clip_name == 'laion/CLIP-ViT-L-14-laion2B-s32B-b82K':
+    if args.model_backend == "mclip":
+        from multilingual_clip import pt_multilingual_clip
+        from transformers import AutoTokenizer
+
+        if args.clip_name is None:
+            args.clip_name = "M-CLIP/XLM-Roberta-Large-Vit-B-32"
+
+        clip_text_encoder = pt_multilingual_clip.MultilingualCLIP.from_pretrained(args.clip_name)
+        clip_text_encoder.is_multilingual_clip = True
+        clip_text_encoder = clip_text_encoder.float().to(device).eval()
+        clip_tokenizer = AutoTokenizer.from_pretrained(args.clip_name)
+        print("mCLIP text encoder loaded.")
+
         clip_img_encoder = CLIPVisionModelWithProjection.from_pretrained(
-            args.clip_name,
+            args.image_clip_name,
             torch_dtype=torch.float32,
-            projection_dim=768
         )
+        image_processor_name = args.image_clip_name
     else:
-        clip_img_encoder = CLIPVisionModelWithProjection.from_pretrained(
-            args.clip_name,
-            torch_dtype=torch.float32
-        )
+        from transformers import CLIPTextModelWithProjection
+
+        if args.clip_name is None:
+            args.clip_name = 'laion/CLIP-ViT-B-32-laion2B-s34B-b79K'
+
+        if args.clip_name == 'laion/CLIP-ViT-L-14-laion2B-s32B-b82K':
+            clip_text_encoder = CLIPTextModelWithProjection.from_pretrained(
+                args.clip_name,
+                torch_dtype=torch.float32,
+                projection_dim=768
+            )
+        else:
+            clip_text_encoder = CLIPTextModelWithProjection.from_pretrained(
+                args.clip_name,
+                torch_dtype=torch.float32
+            )
+        clip_text_encoder = clip_text_encoder.float().to(device).eval()
+        print("clip text encoder loaded.")
+
+        if args.clip_name == 'laion/CLIP-ViT-L-14-laion2B-s32B-b82K':
+            clip_img_encoder = CLIPVisionModelWithProjection.from_pretrained(
+                args.clip_name,
+                torch_dtype=torch.float32,
+                projection_dim=768
+            )
+        else:
+            clip_img_encoder = CLIPVisionModelWithProjection.from_pretrained(
+                args.clip_name,
+                torch_dtype=torch.float32
+            )
+        from clip import tokenize
+
+        clip_tokenizer = tokenize
+        image_processor_name = args.clip_name
 
     clip_img_encoder = clip_img_encoder.float().to(device)
     print("clip img encoder loaded.")
     clip_img_encoder = clip_img_encoder.eval()
 
     if args.clip_model_path:
+        if args.model_backend == "mclip":
+            raise ValueError("--clip-model-path is only supported with the original CLIP backend")
         print('Trying to load the fine-tuned CLIP model')
         state_dict = torch.load(args.clip_model_path, map_location=device)
         clip_text_encoder.load_state_dict(state_dict["CLIPTextEncoder"])
@@ -755,24 +846,9 @@ def main():
     elif args.transform == 'clip':
         print('CLIP preprocess pipeline is used')
         from transformers import CLIPImageProcessor
-        preprocess = CLIPImageProcessor(
-            crop_size={'height': 224, 'width': 224},
-            do_center_crop=True,
-            do_convert_rgb=True,
-            do_normalize=True,
-            do_rescale=True,
-            do_resize=True,
-            image_mean=[0.48145466, 0.4578275, 0.40821073],
-            image_std=[0.26862954, 0.26130258, 0.27577711],
-            resample=3,
-            size={'shortest_edge': 224},
-        )
+        preprocess = CLIPImageProcessor.from_pretrained(image_processor_name)
     else:
         pass
-
-    from clip import tokenize
-
-    clip_tokenizer = tokenize
 
     if 1 >= args.alpha >= 0:
         combining_function = lambda image_features, text_features: element_wise_sum_with_alpha(
@@ -785,7 +861,7 @@ def main():
 
     if args.dataset.lower() == 'cirr':
         if args.text_captions_path:
-            with open(args.text_captions_path, 'r') as f:
+            with open(args.text_captions_path, 'r', encoding='utf-8') as f:
                 text_captions = json.load(f)
 
             print('Running CIRR validation with text and image similarities combined with beta =', args.beta)
@@ -816,7 +892,7 @@ def main():
         average_recall50_list = []
 
         if args.text_captions_path:
-            with open(args.text_captions_path, 'r') as f:
+            with open(args.text_captions_path, 'r', encoding='utf-8') as f:
                 text_captions = json.load(f)
 
             print('Running FashionIQ validation with text and image similarities combined with beta =', args.beta)
@@ -829,7 +905,11 @@ def main():
                 clip_tokenizer,
                 text_captions,
                 args.beta,
-                preprocess
+                preprocess,
+                args.fashioniq_captions_dir,
+                args.fashioniq_caption_language,
+                use_caption_direction_tokens,
+                caption_joiner,
             )
             average_recall10_list.append(shirt_recallat10)
             average_recall50_list.append(shirt_recallat50)
@@ -842,7 +922,11 @@ def main():
                 clip_tokenizer,
                 text_captions,
                 args.beta,
-                preprocess
+                preprocess,
+                args.fashioniq_captions_dir,
+                args.fashioniq_caption_language,
+                use_caption_direction_tokens,
+                caption_joiner,
             )
 
             average_recall10_list.append(dress_recallat10)
@@ -856,7 +940,11 @@ def main():
                 clip_tokenizer,
                 text_captions,
                 args.beta,
-                preprocess
+                preprocess,
+                args.fashioniq_captions_dir,
+                args.fashioniq_caption_language,
+                use_caption_direction_tokens,
+                caption_joiner,
             )
             average_recall10_list.append(toptee_recallat10)
             average_recall50_list.append(toptee_recallat50)

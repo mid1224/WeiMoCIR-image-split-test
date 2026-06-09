@@ -67,6 +67,8 @@ pip install git+https://github.com/openai/CLIP.git
 export PYTHONPATH=$(pwd)
 ```
 
+For Vietnamese FashionIQ validation with mCLIP, `requirements.txt` also installs `multilingual-clip`.
+
 &emsp; 
 </details>
 
@@ -234,6 +236,19 @@ python src/validate_clip.py --dataset FashionIQ \
                             --clip_name laion/CLIP-ViT-bigG-14-laion2B-39B-b160k \
                             --text_captions_path fashionIQ_dataset/labeled_images_cir_cleaned.json \
                             --alpha 0.8 --beta 0.1 
+```
+
+For Vietnamese FashionIQ captions, use the mCLIP backend. The default mCLIP text model is
+`M-CLIP/XLM-Roberta-Large-Vit-B-32`, paired with `openai/clip-vit-base-patch32` for images.
+The `--fashioniq_caption_language vi` option reads files named like `cap.shirt.val.vi.json`.
+
+```bash
+python src/validate_clip.py --dataset FashionIQ \
+                            --model_backend mclip \
+                            --text_captions_path fashionIQ_dataset/labeled_images_cir_cleaned.json \
+                            --fashioniq_captions_dir C:/Users/mid24/Downloads \
+                            --fashioniq_caption_language vi \
+                            --alpha 0.8 --beta 0.1
 ```
 
 </details>

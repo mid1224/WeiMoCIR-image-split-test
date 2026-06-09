@@ -128,6 +128,9 @@ class FashionIQDataset(Dataset):
         mode: str,
         preprocess: callable,
         no_print_output: bool = False,
+        captions_dir: Union[str, Path] = None,
+        caption_language: str = None,
+        use_caption_direction_tokens: bool = True,
         **kwargs
     ):
         """
@@ -156,17 +159,22 @@ class FashionIQDataset(Dataset):
                 raise ValueError("dress_type should be in ['dress', 'shirt', 'toptee']")
 
         self.preprocess = preprocess
+        self.use_caption_direction_tokens = use_caption_direction_tokens
+
+        captions_dir = Path(captions_dir) if captions_dir is not None else base_path / 'fashionIQ_dataset' / 'captions'
+        caption_suffix = f".{caption_language}" if caption_language else ""
 
         # get triplets made by (reference_image, target_image, a pair of relative captions)
         self.triplets: List[dict] = []
         for dress_type in dress_types:
-            with open(base_path / 'fashionIQ_dataset' / 'captions' / f'cap.{dress_type}.{split}.json') as f:
+            captions_path = captions_dir / f'cap.{dress_type}.{split}{caption_suffix}.json'
+            with open(captions_path, encoding='utf-8') as f:
                 self.triplets.extend(json.load(f))
 
         # get the image names
         self.image_names: list = []
         for dress_type in dress_types:
-            with open(base_path / 'fashionIQ_dataset' / 'image_splits' / f'split.{dress_type}.{split}.json') as f:
+            with open(base_path / 'fashionIQ_dataset' / 'image_splits' / f'split.{dress_type}.{split}.json', encoding='utf-8') as f:
                 self.image_names.extend(json.load(f))
 
         if not no_print_output:
@@ -188,8 +196,12 @@ class FashionIQDataset(Dataset):
         try:
             if self.mode == 'relative':
                 raw_image_captions = self.triplets[index]['captions']
-                image_captions = [self.__prepend_text__(ii, forward=True) for ii in raw_image_captions]
-                negated_image_captions = [self.__prepend_text__(ii, forward=False) for ii in raw_image_captions]
+                if self.use_caption_direction_tokens:
+                    image_captions = [self.__prepend_text__(ii, forward=True) for ii in raw_image_captions]
+                    negated_image_captions = [self.__prepend_text__(ii, forward=False) for ii in raw_image_captions]
+                else:
+                    image_captions = raw_image_captions
+                    negated_image_captions = raw_image_captions
                 reference_name = self.triplets[index]['candidate']
 
                 if self.split == 'train':

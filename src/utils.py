@@ -107,14 +107,13 @@ def extract_index_features_clip(
 
     # original
     for names, images in classic_val_loader:
-        # Images are stored in a dictionary
-        pixel_values_list = images['pixel_values']
-        # Convert list of pixel values to a tensor
-        pixel_values = torch.stack(pixel_values_list)
-
-        # Reshape pixel values to (batch_size * num_images, channels, height, width)
-        batch_size, num_images, channels, height, width = pixel_values.shape
-        pixel_values = pixel_values.view(batch_size * num_images, channels, height, width).to(device, non_blocking=True)
+        if isinstance(images, dict):
+            pixel_values = torch.stack(images['pixel_values'])
+            batch_size, num_images, channels, height, width = pixel_values.shape
+            pixel_values = pixel_values.view(batch_size * num_images, channels, height, width)
+        else:
+            pixel_values = images
+        pixel_values = pixel_values.to(device, non_blocking=True)
 
         with torch.no_grad():
             batch_features = clip_model(pixel_values, return_dict=False)[0]
@@ -226,8 +225,7 @@ def extract_index_features_with_text_captions_clip(
         collate_fn=collate_fn,
     )
 
-    # Initialize empty tensor for features, and lists for names and captions
-    index_features = torch.empty((0, clip_text_encoder.text_projection.out_features)).to(device, non_blocking=True)
+    feature_batches = []
     index_names = []
     used_captions = []
 
@@ -249,16 +247,31 @@ def extract_index_features_with_text_captions_clip(
 
         # Encode the captions using CLIPT text encoder
         with torch.no_grad():
-            # The Clip text encoder requires a tokenized input
-            text_tokens = clip_tokenizer(batch_captions, context_length=77).to(device, non_blocking=True)
-            text_features = clip_text_encoder(text_tokens, return_dict=False)[0]
+            text_features = encode_text_features(clip_text_encoder, clip_tokenizer, batch_captions)
 
         # Collect features, names, and captions
-        index_features = torch.vstack((index_features, text_features))
+        feature_batches.append(text_features)
         index_names.extend(names)
         used_captions.extend(batch_captions)
 
+    index_features = torch.vstack(feature_batches)
     return index_features, index_names, used_captions
+
+
+def encode_text_features(
+    clip_text_encoder: nn.Module,
+    clip_tokenizer,
+    captions: List[str],
+) -> torch.Tensor:
+    """
+    Encode text with either the original CLIP text encoder or an mCLIP text encoder.
+    """
+    captions = list(captions)
+    if getattr(clip_text_encoder, "is_multilingual_clip", False):
+        return clip_text_encoder.forward(captions, clip_tokenizer).to(device, non_blocking=True).float()
+
+    text_tokens = clip_tokenizer(captions, context_length=77).to(device, non_blocking=True)
+    return clip_text_encoder(text_tokens, return_dict=False)[0]
 
 
 def element_wise_sum(image_features: torch.Tensor, text_features: torch.Tensor) -> torch.Tensor:
