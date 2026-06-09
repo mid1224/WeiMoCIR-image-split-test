@@ -7,6 +7,7 @@
  * For full license text of the original code, see the LICENSE file in the root of the Bi-Blip4CIR repo.
 """
 import random
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Union, Tuple, List
 
@@ -107,10 +108,16 @@ def extract_index_features_clip(
 
     # original
     for names, images in classic_val_loader:
-        if isinstance(images, dict):
-            pixel_values = torch.stack(images['pixel_values'])
-            batch_size, num_images, channels, height, width = pixel_values.shape
-            pixel_values = pixel_values.view(batch_size * num_images, channels, height, width)
+        if isinstance(images, Mapping) or hasattr(images, "data"):
+            pixel_values = images["pixel_values"]
+            if isinstance(pixel_values, list):
+                pixel_values = torch.stack([
+                    value if torch.is_tensor(value) else torch.as_tensor(value)
+                    for value in pixel_values
+                ])
+            if pixel_values.dim() == 5:
+                batch_size, num_images, channels, height, width = pixel_values.shape
+                pixel_values = pixel_values.view(batch_size * num_images, channels, height, width)
         else:
             pixel_values = images
         pixel_values = pixel_values.to(device, non_blocking=True)
