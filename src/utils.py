@@ -268,10 +268,24 @@ def encode_text_features(
     """
     captions = list(captions)
     if getattr(clip_text_encoder, "is_multilingual_clip", False):
-        return clip_text_encoder.forward(captions, clip_tokenizer).to(device, non_blocking=True).float()
+        return clip_text_encoder.forward(captions, _DeviceTokenizer(clip_tokenizer)).to(device, non_blocking=True).float()
 
     text_tokens = clip_tokenizer(captions, context_length=77).to(device, non_blocking=True)
     return clip_text_encoder(text_tokens, return_dict=False)[0]
+
+
+class _DeviceTokenizer:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def __call__(self, *args, **kwargs):
+        tokens = self.tokenizer(*args, **kwargs)
+        if hasattr(tokens, "to"):
+            return tokens.to(device)
+        return {
+            key: value.to(device) if hasattr(value, "to") else value
+            for key, value in tokens.items()
+        }
 
 
 def element_wise_sum(image_features: torch.Tensor, text_features: torch.Tensor) -> torch.Tensor:
